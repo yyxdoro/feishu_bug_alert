@@ -32,6 +32,8 @@ SUBMIT_LINK = cfg["FEISHU"].get("submit_link", "").strip()
 DEBUG_TARGET_ASSIGNEE_NAMES = [
     s.strip() for s in cfg["FEISHU"].get("debug_target_assignee_names", "").split(",") if s.strip()
 ]
+PRIORITY_FIELD_NAME = cfg["FEISHU"].get("priority_field_name", "优先级")
+DETAIL_ROW_LIMIT = cfg["FEISHU"].getint("detail_row_limit", fallback=10)
 SEND_ENABLED = cfg["FEISHU"].getboolean("send_enabled", fallback=False)
 CREATE_VIEWS_ENABLED = cfg["FEISHU"].getboolean("create_views_enabled", fallback=False)
 REQUIRE_VALID_PERSON_VIEW = cfg["FEISHU"].getboolean("require_valid_person_view", fallback=True)
@@ -285,6 +287,8 @@ def update_view_filter(token, view_id, view_name, filter_info):
 def ensure_person_view(token, fields, person_name, open_id):
     if VIEW_ID:
         return VIEW_ID
+    if not CREATE_VIEWS_ENABLED:
+        return ""
 
     target_view_name = _target_view_name(person_name)
     views = list_views(token)
@@ -372,8 +376,74 @@ def _filter_group_data(group_data):
     }
 
 
-def _build_message_content(assignee_name, filter_link):
-    content = [[{"tag": "text", "text": f"指派人：{assignee_name}"}]]
+def _get_field_text(fields, field_name):
+    value = fields.get(field_name)
+    if isinstance(value, list):
+        if value and all(isinstance(item, dict) for item in value):
+            names = [_extract_person_name(item) or _rich_text_to_text(item) for item in value]
+            return "、".join(name for name in names if name)
+        return "、".join(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return _extract_person_name(value) or _rich_text_to_text(value)
+    return str(value or "").strip()
+
+
+def _priority_value(fields):
+    priority = _get_field_text(fields, PRIORITY_FIELD_NAME)
+    return priority or "未填写"
+
+
+def _summarize_records(records):
+    priority_counts = defaultdict(int)
+    detail_lines = []
+    for record in records:
+        fields = record.get("fields", {})
+        priority = _priority_value(fields)
+        priority_counts[priority] += 1
+        if len(detail_lines) < DETAIL_ROW_LIMIT:
+            status = _get_status_value(fields)
+            if isinstance(status, list):
+                status = "、".join(status)
+            detail_lines.append(
+                f"{len(detail_lines) + 1}. [{priority}] {status or '无状态'} - {_get_bug_title(fields)}"
+            )
+
+    priority_order = ["P0", "P1", "P2", "P3", "P4", "未填写"]
+    summary_parts = []
+    for priority in priority_order:
+        count = priority_counts.pop(priority, 0)
+        if count:
+            summary_parts.append(f"{priority}: {count}")
+    summary_parts.extend(f"{priority}: {count}" for priority, count in sorted(priority_counts.items()))
+    return summary_parts, detail_lines
+
+
+def _build_conclusion(total_count, priority_summary):
+    urgent_parts = []
+    for item in priority_summary:
+        name, _, count = item.partition(": ")
+        if name in {"P0", "P1"} and count and count != "0":
+            urgent_parts.append(item)
+    if urgent_parts:
+        return f"结论：当前存在高优先级未闭环 Bug（{'，'.join(urgent_parts)}），请优先处理。"
+    if total_count:
+        return "结论：当前无 P0/P1 未闭环 Bug，请按计划处理剩余问题。"
+    return "结论：当前没有未闭环 Bug。"
+
+
+def _build_message_content(assignee_name, filter_link, records):
+    total_count = len(records)
+    priority_summary, detail_lines = _summarize_records(records)
+    content = [
+        [{"tag": "text", "text": f"指派人：{assignee_name}"}],
+        [{"tag": "text", "text": f"名下未闭环 Bug 数：{total_count}"}],
+        [{"tag": "text", "text": f"优先级统计：{('，'.join(priority_summary) if priority_summary else '无')}"}],
+        [{"tag": "text", "text": _build_conclusion(total_count, priority_summary)}],
+    ]
+    if detail_lines:
+        content.append([{"tag": "text", "text": "筛选后表格明细：\n" + "\n".join(detail_lines)}])
+        if total_count > len(detail_lines):
+            content.append([{"tag": "text", "text": f"还有 {total_count - len(detail_lines)} 条未展示，请点击筛选链接查看全部。"}])
     if filter_link:
         content.append([
             {"tag": "text", "text": "名下筛选Bug链接："},
@@ -384,6 +454,18 @@ def _build_message_content(assignee_name, filter_link):
         {"tag": "a", "text": "提交问题表单", "href": SUBMIT_LINK},
     ])
     return content
+
+
+def _message_content_to_text(content):
+    lines = []
+    for block in content:
+        line_parts = []
+        for item in block:
+            text = item.get("text", "")
+            href = item.get("href", "")
+            line_parts.append(f"{text} {href}".strip() if href else text)
+        lines.append("".join(line_parts))
+    return "\n".join(lines)
 
 
 def _find_target_people(records):
@@ -430,9 +512,10 @@ def main():
         view_id = ensure_person_view(token, fields, assignee_name, open_id)
         filter_link = get_filter_link(view_id) if view_id else get_filter_link()
         print(f"{assignee_name} 视图链接: {filter_link}")
-        content = _build_message_content(assignee_name, filter_link)
+        content = _build_message_content(assignee_name, filter_link, debug_records)
         if not SEND_ENABLED:
             print(f"未发送消息，send_enabled=false: {assignee_name}")
+            print(_message_content_to_text(content))
             continue
         res = send_feish_msg(open_id, REMIND_TITLE, content, token)
         print({"name": assignee_name, "open_id": open_id, "code": res.get("code"), "msg": res.get("msg")})

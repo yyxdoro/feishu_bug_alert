@@ -6,7 +6,7 @@ from feishu_bug_alert import main
 
 def _next_run_time():
     now = datetime.now()
-    next_run = now.replace(hour=15, minute=40, second=0, microsecond=0)
+    next_run = now.replace(hour=14, minute=00, second=0, microsecond=0)
     while next_run <= now or next_run.weekday() >= 5:
         next_run += timedelta(days=1)
     return next_run
