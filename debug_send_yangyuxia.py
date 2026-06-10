@@ -12,8 +12,7 @@ from feishu_bug_alert import (
     _extract_person_open_id,
     _feishu_request,
     _message_content_to_text,
-    ensure_person_view,
-    get_filter_link,
+    get_person_filter_link,
     get_tenant_token,
     group_by_assignee,
     list_fields,
@@ -77,8 +76,7 @@ def main():
     target_records = query_assignee_records(token, target_open_id)
     print(f"{TARGET_NAME} 未闭环记录数: {len(target_records)}")
 
-    view_id = ensure_person_view(token, fields, TARGET_NAME, target_open_id)
-    filter_link = get_filter_link(view_id) if view_id else get_filter_link()
+    filter_link = get_person_filter_link(token, fields, TARGET_NAME, target_open_id)
     print(f"{TARGET_NAME} 视图链接: {filter_link}")
 
     content = _build_message_content(TARGET_NAME, filter_link, target_records)

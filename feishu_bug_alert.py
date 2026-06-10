@@ -14,7 +14,7 @@ BASE_APP_ID = cfg["FEISHU"]["base_app_id"]
 TABLE_ID = cfg["FEISHU"]["table_id"]
 CLOSED_STATUS = [s.strip() for s in cfg["FEISHU"]["closed_status"].split(",") if s.strip()]
 REMIND_TITLE = cfg["FEISHU"]["remind_title"]
-STATUS_FIELD_NAME = cfg["FEISHU"].get("status_field_name", "Bug状态")
+STATUS_FIELD_NAME = cfg["FEISHU"].get("status_field_name", "进度")
 TITLE_FIELD_NAME = cfg["FEISHU"].get("title_field_name", "Bug标题")
 ASSIGNEE_FIELD_NAME = cfg["FEISHU"].get("assignee_field_name", "指派人")
 DEBUG_ENABLED = cfg["FEISHU"].getboolean("debug_enabled", fallback=False)
@@ -35,7 +35,7 @@ DEBUG_TARGET_ASSIGNEE_NAMES = [
 PRIORITY_FIELD_NAME = cfg["FEISHU"].get("priority_field_name", "优先级")
 DETAIL_ROW_LIMIT = cfg["FEISHU"].getint("detail_row_limit", fallback=10)
 SEND_ENABLED = cfg["FEISHU"].getboolean("send_enabled", fallback=False)
-CREATE_VIEWS_ENABLED = cfg["FEISHU"].getboolean("create_views_enabled", fallback=False)
+CREATE_VIEWS_ENABLED = cfg["FEISHU"].getboolean("create_views_enabled", fallback=True)
 REQUIRE_VALID_PERSON_VIEW = cfg["FEISHU"].getboolean("require_valid_person_view", fallback=True)
 FALLBACK_TO_BASE_LINK = cfg["FEISHU"].getboolean("fallback_to_base_link", fallback=False)
 
@@ -138,7 +138,7 @@ def query_assignee_records(token, open_id):
             ],
         }
     }
-    return _search_bitable_records(token, url, body=body)
+    return _filter_records_by_assignee_open_id(_search_bitable_records(token, url, body=body), open_id)
 
 
 def _as_person_list(value):
@@ -161,6 +161,16 @@ def _extract_person_name(person):
     if not isinstance(person, dict):
         return ""
     return str(person.get("name") or "").strip()
+
+
+def _filter_records_by_assignee_open_id(records, open_id):
+    return [
+        record for record in records
+        if any(
+            _extract_person_open_id(person) == open_id
+            for person in _as_person_list(record.get("fields", {}).get(ASSIGNEE_FIELD_NAME))
+        )
+    ]
 
 
 def _is_person_name_match(fields, field_name, person_name):
@@ -244,8 +254,15 @@ def _view_record_names(token, view_id):
 
 
 def _is_valid_person_view(token, view_id, person_name):
-    names = _view_record_names(token, view_id)
-    return bool(names) and names == {person_name}
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BASE_APP_ID}/tables/{TABLE_ID}/records/search"
+    records = _search_bitable_records(token, url, body={"view_id": view_id})
+    if not records:
+        return False
+    for record in records:
+        assignees = _as_person_list(record.get("fields", {}).get(ASSIGNEE_FIELD_NAME))
+        if not any(_extract_person_name(person) == person_name for person in assignees):
+            return False
+    return True
 
 
 def _person_filter_info(fields, open_id):
@@ -285,7 +302,7 @@ def update_view_filter(token, view_id, view_name, filter_info):
 
 
 def ensure_person_view(token, fields, person_name, open_id):
-    if VIEW_ID:
+    if VIEW_ID and _is_valid_person_view(token, VIEW_ID, person_name):
         return VIEW_ID
     if not CREATE_VIEWS_ENABLED:
         return ""
@@ -300,13 +317,22 @@ def ensure_person_view(token, fields, person_name, open_id):
 
     if not view_id:
         created = create_view(token, target_view_name)
-        if created.get("code") != 0:
-            print(f"创建视图失败: {created.get('code')} {created.get('msg')}")
-            return ""
+        _require_success(created, f"创建视图 {target_view_name}")
         view_id = str(created.get("data", {}).get("view", {}).get("view_id") or "").strip()
+        if not view_id:
+            raise RuntimeError(f"创建视图 {target_view_name} 成功但没有返回 view_id")
 
     update_view_filter(token, view_id, target_view_name, _person_filter_info(fields, open_id))
     return view_id
+
+
+def get_person_filter_link(token, fields, person_name, open_id):
+    view_id = ensure_person_view(token, fields, person_name, open_id)
+    if not view_id:
+        raise RuntimeError(f"{person_name} 未生成个人筛选视图，停止发送，避免发送整表链接")
+    if REQUIRE_VALID_PERSON_VIEW and not _is_valid_person_view(token, view_id, person_name):
+        raise RuntimeError(f"{person_name} 视图未通过个人筛选校验，停止发送: {view_id}")
+    return get_filter_link(view_id)
 
 
 def _rich_text_to_text(value):
@@ -509,8 +535,7 @@ def main():
         assignee_name = assignee_data["name"]
         debug_records = query_assignee_records(token, open_id)
         print(f"{assignee_name} 未闭环记录数: {len(debug_records)}")
-        view_id = ensure_person_view(token, fields, assignee_name, open_id)
-        filter_link = get_filter_link(view_id) if view_id else get_filter_link()
+        filter_link = get_person_filter_link(token, fields, assignee_name, open_id)
         print(f"{assignee_name} 视图链接: {filter_link}")
         content = _build_message_content(assignee_name, filter_link, debug_records)
         if not SEND_ENABLED:
