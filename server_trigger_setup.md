@@ -1,6 +1,6 @@
-# 服务器部署触发器设置
+# 服务器部署 scheduler 设置
 
-推荐在 Linux 服务器上使用 `cron` 定时触发。
+推荐在 Linux 服务器上使用 `systemd` 常驻运行 `feishu_bug_alert.py`，由脚本内 APScheduler 每天 14:00 触发提醒。
 
 ## 1. 项目路径
 
@@ -34,51 +34,73 @@ Python 虚拟环境：
 mkdir -p /home/ec2-user/yuha/feishu_bug_alert/logs
 ```
 
-## 3. 编辑 crontab
+## 3. 安装依赖
 
 ```bash
-crontab -e
+cd /home/ec2-user/yuha/feishu_bug_alert
+/home/ec2-user/yuha/feishu_bug_alert/.venv/bin/python3 -m pip install -r requirements.txt
 ```
 
-添加下面这一行，表示每周一到周五 06:00 执行：
-
-```cron
-0 6 * * 1-5 cd /home/ec2-user/yuha/feishu_bug_alert && /home/ec2-user/yuha/feishu_bug_alert/.venv/bin/python3 /home/ec2-user/yuha/feishu_bug_alert/feishu_bug_alert.py >> /home/ec2-user/yuha/feishu_bug_alert/logs/cron.log 2>&1
-```
-
-如果需要直接替换旧路径，可以先备份再批量替换：
+## 4. 创建 systemd 服务
 
 ```bash
-crontab -l > /tmp/feishu_bug_alert.cron.bak
-crontab -l | sed 's#/home/ec2-user/feishu_bug_alert#/home/ec2-user/yuha/feishu_bug_alert#g' | crontab -
+sudo tee /etc/systemd/system/feishu-bug-alert.service >/dev/null <<'EOF'
+[Unit]
+Description=Feishu bug alert scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ec2-user/yuha/feishu_bug_alert
+ExecStart=/home/ec2-user/yuha/feishu_bug_alert/.venv/bin/python3 /home/ec2-user/yuha/feishu_bug_alert/feishu_bug_alert.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ec2-user/yuha/feishu_bug_alert/logs/scheduler.log
+StandardError=append:/home/ec2-user/yuha/feishu_bug_alert/logs/scheduler.err.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
 ```
 
-## 4. 查看是否已写入
+## 5. 启动并设置开机自启
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now feishu-bug-alert.service
+```
+
+## 6. 查看运行状态
+
+```bash
+systemctl status feishu-bug-alert.service
+```
+
+确认日志包含：
+
+```text
+Feishu bug alert scheduler started: Asia/Shanghai, every day 14:00
+```
+
+## 7. 查看日志
+
+```bash
+tail -n 100 /home/ec2-user/yuha/feishu_bug_alert/logs/scheduler.log
+tail -n 100 /home/ec2-user/yuha/feishu_bug_alert/logs/scheduler.err.log
+```
+
+## 8. 停用旧 crontab
 
 ```bash
 crontab -l
 ```
 
-确认输出包含：
+如果仍有旧的 `feishu_bug_alert.py` 定时行，需要从 `crontab -e` 中删除，避免同一天重复发送。
 
-```cron
-0 6 * * 1-5 cd /home/ec2-user/yuha/feishu_bug_alert && /home/ec2-user/yuha/feishu_bug_alert/.venv/bin/python3 /home/ec2-user/yuha/feishu_bug_alert/feishu_bug_alert.py >> /home/ec2-user/yuha/feishu_bug_alert/logs/cron.log 2>&1
-```
+## 9. 注意事项
 
-## 5. 手动测试一次
-
-```bash
-cd /home/ec2-user/yuha/feishu_bug_alert && /home/ec2-user/yuha/feishu_bug_alert/.venv/bin/python3 /home/ec2-user/yuha/feishu_bug_alert/feishu_bug_alert.py
-```
-
-## 6. 查看日志
-
-```bash
-tail -n 100 /home/ec2-user/yuha/feishu_bug_alert/logs/cron.log
-```
-
-## 7. 注意事项
-
-- 服务器时区必须正确，否则 06:00 可能不是你预期的本地时间。
+- `feishu_bug_alert.py` 已指定 `Asia/Shanghai`，每天 14:00 触发。
 - 用 `date` 检查服务器当前时间。
+- 不要直接调用 `main()` 做线上调试；如需调试发送，请先把收件人限制为杨玉霞。
 - 不要把 `app_secret` 提交到公开仓库；生产环境更推荐改成环境变量或服务器私有配置文件。

@@ -521,5 +521,21 @@ def main():
         print({"name": assignee_name, "open_id": open_id, "code": res.get("code"), "msg": res.get("msg")})
 
 
+def run_scheduler():
+    from apscheduler.schedulers.blocking import BlockingScheduler
+
+    scheduler = BlockingScheduler(timezone="Asia/Shanghai")
+    scheduler.add_job(
+        main,
+        "cron",
+        hour=14,
+        minute=0,
+        id="feishu_bug_alert",
+        replace_existing=True,
+    )
+    print("Feishu bug alert scheduler started: Asia/Shanghai, every day 14:00", flush=True)
+    scheduler.start()
+
+
 if __name__ == "__main__":
-    main()
+    run_scheduler()
