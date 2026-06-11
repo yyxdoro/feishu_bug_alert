@@ -255,14 +255,14 @@ def _view_record_names(token, view_id):
     return names
 
 
-def _is_valid_person_view(token, view_id, person_name):
+def _is_valid_person_view(token, view_id, open_id):
     url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BASE_APP_ID}/tables/{TABLE_ID}/records/search"
     records = _search_bitable_records(token, url, body={"view_id": view_id})
     if not records:
         return False
     for record in records:
         assignees = _as_person_list(record.get("fields", {}).get(ASSIGNEE_FIELD_NAME))
-        if not any(_extract_person_name(person) == person_name for person in assignees):
+        if not any(_extract_person_open_id(person) == open_id for person in assignees):
             return False
     return True
 
@@ -304,7 +304,7 @@ def update_view_filter(token, view_id, view_name, filter_info):
 
 
 def ensure_person_view(token, fields, person_name, open_id):
-    if VIEW_ID and _is_valid_person_view(token, VIEW_ID, person_name):
+    if VIEW_ID and _is_valid_person_view(token, VIEW_ID, open_id):
         return VIEW_ID
     if not CREATE_VIEWS_ENABLED:
         return ""
@@ -332,7 +332,7 @@ def get_person_filter_link(token, fields, person_name, open_id):
     view_id = ensure_person_view(token, fields, person_name, open_id)
     if not view_id:
         raise RuntimeError(f"{person_name} 未生成个人筛选视图，停止发送，避免发送整表链接")
-    if REQUIRE_VALID_PERSON_VIEW and not _is_valid_person_view(token, view_id, person_name):
+    if REQUIRE_VALID_PERSON_VIEW and not _is_valid_person_view(token, view_id, open_id):
         raise RuntimeError(f"{person_name} 视图未通过个人筛选校验，停止发送: {view_id}")
     return get_filter_link(view_id)
 
@@ -537,7 +537,11 @@ def main(send_enabled=SEND_ENABLED):
         assignee_name = assignee_data["name"]
         debug_records = query_assignee_records(token, open_id)
         print(f"{assignee_name} 未闭环记录数: {len(debug_records)}")
-        filter_link = get_person_filter_link(token, fields, assignee_name, open_id)
+        try:
+            filter_link = get_person_filter_link(token, fields, assignee_name, open_id)
+        except Exception as exc:
+            print(f"{assignee_name} 跳过发送: {exc}")
+            continue
         print(f"{assignee_name} 视图链接: {filter_link}")
         content = _build_message_content(assignee_name, filter_link, debug_records)
         if not send_enabled:
